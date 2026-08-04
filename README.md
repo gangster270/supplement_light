@@ -91,12 +91,41 @@ python3 -m pytest tests/ -q
 
 ### 배포 (Streamlit Community Cloud)
 
-저장소를 연결하고 메인 파일을 `app.py` 로 지정하면 된다. 배포에 필요한 파일은
-`app.py`, `requirements.txt`, `config/site.yaml`, `src/` 이며 `data/` 는 필요 없다
-(데모 시나리오는 코드에서 생성한다).
+[share.streamlit.io](https://share.streamlit.io) 에 GitHub 계정으로 로그인한 뒤
+앱을 만들면서 아래를 지정한다.
+
+| 항목 | 값 |
+|------|-----|
+| Repository | `gangster270/supplement_light` |
+| Branch | `main` |
+| Main file path | `app.py` |
+| Python version (Advanced settings) | **3.11 또는 3.12** — CI 가 검증한 버전 |
+
+이 저장소는 공개(public)라 별도 접근 권한 설정이 필요 없다.
+`requirements.txt` 는 저장소 루트에 있고 Cloud 가 자동으로 설치한다.
+
+**배포 전 검증 결과** (main 트리를 그대로 꺼내 빈 가상환경에서 확인)
+
+| 항목 | 결과 |
+|------|------|
+| `requirements.txt` 만으로 설치 | ✅ 누락 의존성 없음 |
+| 테스트 | ✅ 155개 통과 |
+| `data/` 없이 앱 기동 | ✅ 정상 (Cloud 환경과 동일 조건) |
+| 3D 화면 렌더 | ✅ |
+| 메모리 사용 | 약 **214 MB** (Community Cloud 한도 내) |
+
+**콜드 스타트에 10~20초 걸린다.** 처음 열 때 청천 프로파일과 예측기를 학습하기 때문이며
+(1년치 학습 이력이 필요하다 — 위 예측 정확도 항목 참고), 학습 중에는 스피너가 뜬다.
+Community Cloud 앱은 일정 시간 접속이 없으면 잠들었다가 다시 깨어나므로,
+**시연 직전에 링크를 한 번 열어 예열해 두는 편이 좋다.**
+
+배포에 필요한 것은 `app.py`, `requirements.txt`, `config/site.yaml`, `src/` 이며
+`data/` 는 필요 없다 (데모 시나리오는 코드에서 생성한다).
 
 실데이터로 돌리려면 `data/logger/` (ZL6 export), `data/external/` (외부 PPFD)에 넣고
-`config/site.yaml` 의 구역-로거 매핑을 맞춘다.
+`config/site.yaml` 의 구역-로거 매핑을 맞춘다. 다만 `data/` 는 gitignore 이므로
+Cloud 에는 올라가지 않는다 — 공개 배포에서 실측 데이터를 쓰려면 별도 저장소나
+업로드 기능(파일 업로드 모드)을 쓴다.
 
 ## 구조
 
