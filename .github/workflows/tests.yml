@@ -1,0 +1,47 @@
+name: tests
+
+# 판단 엔진이 조용히 깨지면 시연에서야 알게 된다. 푸시할 때마다 돌린다.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 개발 환경은 3.11. 3.12 도 함께 돌려 버전 차이로 깨지는 것을 미리 잡는다.
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+      # data/ 는 저장소에 없다(gitignore). 테스트가 실데이터에 의존하기 시작하면
+      # 여기서 먼저 깨져야 한다 — 배포 환경에도 data/ 가 없기 때문이다.
+      - name: Check config loads without data files
+        run: |
+          python -c "
+          from src.config import load_config
+          cfg = load_config()
+          print('zones:', cfg.zone_ids)
+          print('unverified:', cfg.unverified_groups)
+          assert cfg.zone_ids, 'site.yaml 에 구역이 없습니다'
+          "

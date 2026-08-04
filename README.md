@@ -36,6 +36,9 @@ python3 tools/run_decisions.py --start 2026-04-04 --end 2026-04-06 --target 16
 python3 -m pytest tests/ -q
 ```
 
+테스트는 GitHub Actions(`.github/workflows/tests.yml`)에서 Python 3.11·3.12 로
+자동 실행된다. `data/` 는 저장소에 없으므로 테스트가 실데이터에 의존하면 CI 에서 먼저 깨진다.
+
 첫 실행은 청천 프로파일 학습에 **10~15초** 걸린다(이후 캐시). 브라우저가 자동으로
 열리지 않으면 `http://localhost:8501` 로 접속한다.
 
