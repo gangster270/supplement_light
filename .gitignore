@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 데이터는 저장소에 넣지 않는다 (합성 샘플은 tools/make_sample_data.py 로 재생성)
+data/
