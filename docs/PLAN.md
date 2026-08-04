@@ -169,6 +169,7 @@ supplement_light/
 | **P6** | Streamlit 시범 서비스 | `app.py`, `scenario.py` | 브라우저 실제 조작 |
 | **S0** | 안전 조건 (고온·센서 이상) | `decision.py` | 경계 조건 테스트 |
 | **P7** | 판단 이력 + 제어 명령 미리보기 | `logbook.py`, `control.py` | 요금 수계산 대조 |
+| — | 3D 온실 현황 시각화 | `scene3d.py` | 태양 위치 물리 검증 + 브라우저 확인 |
 | — | 정밀 경제성 (기본요금·ROI) | `economics.py` | 청구서 대조 |
 | **P8** | 문서화 (사용법 / 파라미터 재산출 절차) | `README.md` | — |
 

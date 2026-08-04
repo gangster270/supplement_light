@@ -155,6 +155,20 @@ class TariffConfig:
 
 
 @dataclass(frozen=True)
+class LayoutConfig:
+    """3D 시각화용 온실 형상. 판단 로직에는 일절 쓰이지 않는다."""
+
+    greenhouse_width_m: float = 8.0
+    greenhouse_length_m: float = 24.0
+    wall_height_m: float = 2.5
+    ridge_height_m: float = 4.5
+    gap_between_houses_m: float = 4.0
+    lamp_height_m: float = 2.2
+    canopy_height_m: float = 0.8
+    fixtures_per_row: int = 3
+
+
+@dataclass(frozen=True)
 class ExternalConfig:
     ppfd_column: str
     night_threshold: float
@@ -173,10 +187,13 @@ class SiteConfig:
     ni: NIConfig
     decision: DecisionConfig
     safety: SafetyConfig
+    layout: LayoutConfig
     forecast: ForecastConfig
     tariff: TariffConfig
     logger_dir: Path
     external_dir: Path
+    latitude: float = 37.0
+    longitude: float = 127.0
     unverified_groups: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -419,6 +436,11 @@ def load_config(path: str | Path | None = None) -> SiteConfig:
             allowed_windows=_parse_windows(dec_block.get("allowed_windows", [])),
             urgency_margin_hours=float(dec_block.get("urgency_margin_hours", 0.5)),
         ),
+        latitude=float(site.get("latitude", 37.0)),
+        longitude=float(site.get("longitude", 127.0)),
+        layout=LayoutConfig(**{k: (int(v) if k == "fixtures_per_row" else float(v))
+                               for k, v in (raw.get("layout", {}) or {}).items()
+                               if k in LayoutConfig.__dataclass_fields__}),
         safety=SafetyConfig(
             max_air_temperature=float(safety_block.get("max_air_temperature", 32.0)),
             resume_air_temperature=float(safety_block.get("resume_air_temperature", 30.0)),

@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.config import (DecisionConfig, ExternalConfig, ForecastConfig, GreenhouseConfig,
-                        LampConfig, NIConfig, SafetyConfig, SiteConfig, TariffConfig,
-                        TariffSeason, TariffSlot, ZoneConfig)
+                        LampConfig, LayoutConfig, NIConfig, SafetyConfig, SiteConfig,
+                        TariffConfig, TariffSeason, TariffSlot, ZoneConfig)
 from src.decision import DecisionParams, DecisionState
 from src.ingest import SiteFrame
 from src.tariff import TariffLookup
@@ -52,6 +52,7 @@ def cfg() -> SiteConfig:
             urgency_margin_hours=0.5),
         safety=SafetyConfig(max_air_temperature=32.0, resume_air_temperature=30.0,
                             override_ni_on_high_temp=False, max_sensor_age_minutes=30.0),
+        layout=LayoutConfig(),
         forecast=ForecastConfig(mode="standard",
                                 mode_factors={"conservative": 0.75, "standard": 1.0,
                                               "aggressive": 1.25},

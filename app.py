@@ -14,6 +14,7 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -33,14 +34,16 @@ from src.logbook import LogBook
 from src.metrics import cumulative_dli, fill_missing, moving_average
 from src.scenario import (DEFAULT_SCENARIO, SCENARIOS, build_scenario_frame,
                           build_training_frame, inject_sensor_fault)
+from src.scene3d import STATUS_ICONS, build_scene, solar_position, zone_view_from
 
 st.set_page_config(page_title="보광 의사결정 서비스", page_icon="🌱", layout="wide")
 
-STATUS_STYLE = {
-    DisplayStatus.RECOMMEND_ON: ("#1b5e20", "#c8e6c9", "🟢"),
-    DisplayStatus.NOT_NEEDED: ("#37474f", "#eceff1", "⚪"),
-    DisplayStatus.DEFER: ("#e65100", "#ffe0b2", "🟡"),
-    DisplayStatus.CHECK_SENSOR: ("#b71c1c", "#ffcdd2", "🔴"),
+# 배너 배경색. 아이콘은 3D 화면과 같은 것을 쓴다 (scene3d.STATUS_ICONS).
+STATUS_BG = {
+    DisplayStatus.RECOMMEND_ON: ("#1b5e20", "#c8e6c9"),
+    DisplayStatus.NOT_NEEDED: ("#37474f", "#eceff1"),
+    DisplayStatus.DEFER: ("#e65100", "#ffe0b2"),
+    DisplayStatus.CHECK_SENSOR: ("#b71c1c", "#ffcdd2"),
 }
 
 
@@ -74,7 +77,8 @@ def _prepare_cached(cache_key: str, _cfg, _frame, _training):
 
 
 def _status_banner(decision, state) -> None:
-    fg, bg, icon = STATUS_STYLE[decision.status]
+    fg, bg = STATUS_BG[decision.status]
+    icon = STATUS_ICONS[decision.status]
     st.markdown(
         f"""<div style="background:{bg};color:{fg};padding:18px 22px;border-radius:12px;
         border-left:10px solid {fg};">
@@ -272,6 +276,16 @@ zone_id = st.sidebar.selectbox("표시 구역", cfg.zone_ids,
 # =====================================================================
 
 st.sidebar.divider()
+with st.sidebar.expander("🏠 3D 화면 설정", expanded=False):
+    show_3d = st.checkbox("3D 온실 현황 표시", value=True)
+    scope_all = st.radio("표시 범위", ["선택 온실만", "전체 온실"], index=0,
+                         horizontal=True,
+                         help="온실이 여러 동이면 '선택 온실만'이 읽기 쉽습니다.") == "전체 온실"
+    show_cones = st.checkbox("광 분포(원뿔) 표시", value=True)
+    st.caption("치수는 config/site.yaml 의 layout 블록에서 옵니다. "
+               "시각화 전용이며 판단 결과에는 영향을 주지 않습니다.")
+
+st.sidebar.divider()
 st.sidebar.subheader("재생 제어")
 speed = st.sidebar.select_slider(
     "속도 (실제 1초당 가상 시간)", [10, 60, 300, 600, 1800],
@@ -330,6 +344,44 @@ def live_panel() -> None:
 
     state, decision = engine.evaluate(source, zone_id)
     _status_banner(decision, state)
+
+    # --- 3D 온실 현황 ---
+    all_views = {z: zone_view_from(cfg, *engine.evaluate(source, z)) for z in cfg.zone_ids}
+    ext_series = source.external_history()
+    ext_now = float(ext_series.iloc[-1]) if len(ext_series) else None
+
+    if show_3d:
+        st.markdown("#### 온실 현황 (3D)")
+        elevation, azimuth = solar_position(cfg.latitude, cfg.longitude, state.now)
+        sun_txt = (f"태양 고도 {elevation:.0f}° · 방위 {azimuth:.0f}°" if elevation > 0
+                   else "일몰 후")
+        ext_txt = "—" if ext_now is None or np.isnan(ext_now) else f"{ext_now:,.0f} µmol"
+        st.caption(f"{state.now:%Y-%m-%d %H:%M} · {sun_txt} · 외부 광량 {ext_txt} "
+                   f"— 마우스로 돌려 보고, 구역·등기구에 올리면 상세 수치가 나옵니다.")
+        fig3d = build_scene(cfg, all_views, state.now, external_ppfd=ext_now,
+                            show_light_cones=show_cones,
+                            only_greenhouse=None if scope_all
+                            else cfg.greenhouse_of(zone_id).id)
+        st.plotly_chart(fig3d, use_container_width=True,
+                        config={"displayModeBar": False},
+                        key="scene3d")
+        st.caption("바닥 색 = 판단 상태 · 기둥 높이 = DLI 달성률(점선이 목표) · "
+                   "노란 등기구 = 점등 중 · 해 위치 = 실제 태양 고도·방위")
+
+    # --- 구역 상태판 (전 구역 한눈에) ---
+    st.markdown("#### 구역 상태")
+    cols = st.columns(len(all_views))
+    for col, (zid, v) in zip(cols, all_views.items()):
+        with col:
+            st.markdown(f"**{STATUS_ICONS[v.status]} {v.name}**")
+            st.caption(f"{v.status.value} · 등기구 {'ON' if v.lamp_on else 'OFF'}")
+            st.progress(min(v.progress, 1.0),
+                        text=f"DLI {v.dli_today:.1f}/{v.target_dli:.0f} ({v.progress:.0%})")
+            ppfd_txt = "—" if v.ppfd is None else f"{v.ppfd:,.0f}"
+            temp_txt = "" if v.temperature is None else f" · {v.temperature:.1f}℃"
+            st.caption(f"PPFD {ppfd_txt} µmol{temp_txt}")
+
+    st.divider()
 
     # --- 근거 카드 ---
     st.markdown("#### 판단 근거")
