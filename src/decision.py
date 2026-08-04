@@ -6,6 +6,7 @@
 
 계층 구조 (위가 아래를 덮어쓴다):
 
+  S0 안전 조건   고온 차단 / 센서 이상 (광량 판단보다 먼저)
   L0 실험 제약   NI 스케줄 / 일일 점등 상한 / 광주기 상한 / 허용 시간대
   L1 안정화      최소 점등·소등 유지시간 (채터링 방지)
   L2 DLI 부족분  목표 DLI 를 못 채울 전망이면 점등            ← 주 판단
@@ -23,9 +24,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from .config import DecisionConfig, LampConfig, NIConfig, SiteConfig
+from .config import DecisionConfig, LampConfig, NIConfig, SafetyConfig, SiteConfig
 from .tariff import TariffLookup
-from .timeutil import TimeWindow, day_bounds, in_any_window
+from .timeutil import day_bounds, in_any_window
 
 
 class Signal(str, Enum):
@@ -48,7 +49,18 @@ class Action(str, Enum):
         return self in (Action.TURN_ON, Action.TURN_OFF)
 
 
+class DisplayStatus(str, Enum):
+    """화면에 띄우는 4가지 상태. 신호(ON/OFF)보다 사람이 읽기 쉬운 층위다."""
+
+    RECOMMEND_ON = "보광 권장"
+    NOT_NEEDED = "보광 불필요"
+    DEFER = "보광 보류"
+    CHECK_SENSOR = "센서 확인"
+
+
 class Layer(str, Enum):
+    SENSOR_FAULT = "S0-센서 이상"
+    HIGH_TEMP = "S0-고온 차단"
     NI = "L0-NI 스케줄"
     DAILY_CAP = "L0-일일 점등상한"
     PHOTOPERIOD_CAP = "L0-광주기 상한"
@@ -70,6 +82,7 @@ class DecisionParams:
     lamp: LampConfig
     ni: NIConfig
     interval_minutes: int
+    safety: SafetyConfig | None = None
     tariff: TariffLookup | None = None
 
     @property
@@ -98,6 +111,8 @@ class DecisionState:
     photoperiod_minutes_today: float | None = None
     forecast_note: str = ""
     forecast_confidence: str = "high"
+    air_temperature: float | None = None      # 안전 조건용 (없으면 고온 판단 생략)
+    sensor_age_minutes: float | None = None   # 마지막 유효 측정 이후 경과 분
 
 
 @dataclass(frozen=True)
@@ -118,11 +133,23 @@ class Decision:
     price_now: float | None = None
     price_slot: str = ""
     blocked_by: str | None = None
+    warning: str | None = None
     evidence: dict = field(default_factory=dict)
 
     @property
     def should_be_on(self) -> bool:
         return self.signal is Signal.ON
+
+    @property
+    def status(self) -> DisplayStatus:
+        """화면 표시용 4상태. ON/OFF 만으로는 '지금은 보류'인지 '필요 없음'인지 구분되지 않는다."""
+        if self.layer is Layer.SENSOR_FAULT:
+            return DisplayStatus.CHECK_SENSOR
+        if self.signal is Signal.ON:
+            return DisplayStatus.RECOMMEND_ON
+        if self.layer in (Layer.TARIFF_DEFER, Layer.HOLD, Layer.HIGH_TEMP):
+            return DisplayStatus.DEFER
+        return DisplayStatus.NOT_NEEDED
 
 
 # =====================================================================
@@ -135,6 +162,7 @@ def build_params(cfg: SiteConfig) -> DecisionParams:
         lamp=cfg.lamp,
         ni=cfg.ni,
         interval_minutes=cfg.interval_minutes,
+        safety=cfg.safety,
         tariff=TariffLookup(cfg.tariff),
     )
 
@@ -184,7 +212,8 @@ def estimate_natural_ppfd(state: DecisionState, params: DecisionParams) -> float
 
 
 def _finalize(state: DecisionState, params: DecisionParams, desired: Signal,
-              layer: Layer, reason: str, bypass_hold: bool = False, **kw) -> Decision:
+              layer: Layer, reason: str, bypass_hold: bool = False,
+              warning: str | None = None, **kw) -> Decision:
     """L1(최소 유지시간)을 적용해 최종 행동을 정한다."""
     d = params.decision
     price_now = params.tariff.price(state.now) if params.tariff else None
@@ -209,6 +238,7 @@ def _finalize(state: DecisionState, params: DecisionParams, desired: Signal,
 
     return Decision(signal=desired, action=action, layer=layer, reason=reason,
                     price_now=price_now, price_slot=price_slot, blocked_by=blocked,
+                    warning=warning,
                     natural_ppfd_estimate=estimate_natural_ppfd(state, params), **kw)
 
 
@@ -220,16 +250,69 @@ def decide(state: DecisionState, params: DecisionParams) -> Decision:
     """한 구역, 한 시점의 점등 판단."""
     d = params.decision
     lamp = params.lamp
+    safety = params.safety
     ni_applies = params.ni.applies_to(state.treatment)
+    in_ni = ni_applies and params.ni.window.contains(state.now)
 
-    # ---------------- L0: 실험 제약 (최우선, 최소유지시간도 무시) ----------------
-    if ni_applies and params.ni.window.contains(state.now):
+    # ---------------- DLI 수지 계산 (모든 분기에서 공통) ----------------
+    # ★ 안전·제약 레이어에서 조기 반환하더라도 이 숫자들은 채워서 내보낸다.
+    #   안 그러면 화면과 판단 이력에 0 이 찍혀 '충족'처럼 읽힌다 (실제로 발생했던 표시 버그).
+    discretionary, ni_slots = _remaining_slots(state.now, params, ni_applies)
+    dli_per_hour = lamp.dli_per_hour()
+    planned_ni_dli = len(ni_slots) * params.interval_hours * dli_per_hour
+    projected = state.dli_today + state.forecast_remaining + planned_ni_dli
+    deficit = max(0.0, d.target_dli - projected)
+    hours_needed = deficit / dli_per_hour if dli_per_hour > 0 else float("inf")
+    hours_available = len(discretionary) * params.interval_hours
+    slack = hours_available - hours_needed
+    common = dict(deficit_dli=deficit, hours_needed=hours_needed,
+                  hours_available=hours_available, slack_hours=slack,
+                  planned_ni_dli=planned_ni_dli, projected_dli=projected)
+
+    # ---------------- S0: 안전 조건 (광량 판단보다 먼저) ----------------
+    too_hot = safety is not None and safety.is_too_hot(state.air_temperature, state.lamp_on)
+    heat_warning = None
+    if too_hot:
+        heat_warning = (
+            f"기온 {state.air_temperature:.1f}℃ 로 고온 한계"
+            f"({safety.max_air_temperature:.1f}℃)를 넘었습니다. 등기구는 발열원이므로 "
+            f"고온 스트레스를 가중시킵니다.")
+        # NI 는 실험 처리 조건이라 기본적으로 고온에도 유지한다 (설정으로 변경 가능).
+        if not in_ni or safety.override_ni_on_high_temp:
+            note = (" NI 구간이지만 안전 우선 설정(override_ni_on_high_temp: true)에 따라 "
+                    "중단합니다 — 실험 처리 조건이 깨지므로 연구자 확인이 필요합니다."
+                    if in_ni else "")
+            return _finalize(
+                state, params, Signal.OFF, Layer.HIGH_TEMP,
+                heat_warning + " 보광을 중단합니다." + note,
+                bypass_hold=True, warning=heat_warning,
+                evidence={"air_temperature": state.air_temperature,
+                          "max_air_temperature": safety.max_air_temperature,
+                          "overrode_ni": in_ni, "target_dli": d.target_dli}, **common)
+
+    if (safety is not None and state.sensor_age_minutes is not None
+            and state.sensor_age_minutes > safety.max_sensor_age_minutes and not in_ni):
+        # 죽은 센서 값으로 계속 판단하면 틀린 근거로 보광을 권고하게 된다.
+        # 임의로 켜거나 끄지 않고 현재 상태를 유지한 채 사람에게 넘긴다.
+        return _finalize(
+            state, params, Signal.ON if state.lamp_on else Signal.OFF, Layer.SENSOR_FAULT,
+            f"마지막 유효 측정이 {state.sensor_age_minutes:.0f}분 전입니다 "
+            f"(허용 {safety.max_sensor_age_minutes:.0f}분). 센서·통신 상태를 확인하세요. "
+            f"확인 전까지 현재 상태({'점등' if state.lamp_on else '소등'})를 유지합니다.",
+            bypass_hold=True, warning="센서 데이터가 갱신되지 않고 있습니다.",
+            evidence={"sensor_age_minutes": state.sensor_age_minutes,
+                      "ppfd_source": state.ppfd_source, "target_dli": d.target_dli}, **common)
+
+    # ---------------- L0: 실험 제약 (최소유지시간도 무시) ----------------
+    if in_ni:
         return _finalize(
             state, params, Signal.ON, Layer.NI,
             f"NI(야간중단) 구간 {params.ni.window} 입니다. 실험 처리 조건이므로 "
-            f"광량과 무관하게 점등을 유지합니다.",
-            bypass_hold=True,
-            evidence={"ni_window": str(params.ni.window), "treatment": state.treatment})
+            f"광량과 무관하게 점등을 유지합니다."
+            + (" ※ 다만 현재 고온 상태입니다." if too_hot else ""),
+            bypass_hold=True, warning=heat_warning,
+            evidence={"ni_window": str(params.ni.window), "treatment": state.treatment,
+                      "high_temp": too_hot, "target_dli": d.target_dli}, **common)
 
     max_daily_minutes = d.max_daily_lighting_hours * 60
     if state.lighting_minutes_today >= max_daily_minutes:
@@ -238,7 +321,8 @@ def decide(state: DecisionState, params: DecisionParams) -> Decision:
             f"오늘 누적 점등 {state.lighting_minutes_today / 60:.1f}시간으로 상한"
             f"({d.max_daily_lighting_hours:.1f}시간)에 도달했습니다. 추가 점등하지 않습니다.",
             bypass_hold=True,
-            evidence={"lighting_hours_today": state.lighting_minutes_today / 60})
+            evidence={"lighting_hours_today": state.lighting_minutes_today / 60,
+                      "target_dli": d.target_dli}, **common)
 
     if (state.photoperiod_minutes_today is not None
             and state.photoperiod_minutes_today >= d.max_photoperiod_hours * 60):
@@ -246,30 +330,18 @@ def decide(state: DecisionState, params: DecisionParams) -> Decision:
             state, params, Signal.OFF, Layer.PHOTOPERIOD_CAP,
             f"오늘 광주기가 상한({d.max_photoperiod_hours:.1f}시간)에 도달했습니다.",
             bypass_hold=True,
-            evidence={"photoperiod_hours": state.photoperiod_minutes_today / 60})
+            evidence={"photoperiod_hours": state.photoperiod_minutes_today / 60,
+                      "target_dli": d.target_dli}, **common)
 
     if not in_any_window(state.now, d.allowed_windows):
         windows = ", ".join(str(w) for w in d.allowed_windows) or "(설정 없음)"
         return _finalize(
             state, params, Signal.OFF, Layer.OUTSIDE_WINDOW,
             f"보광 허용 시간대({windows}) 밖입니다.",
-            bypass_hold=True, evidence={"allowed_windows": windows})
-
-    # ---------------- L2: DLI 부족분 ----------------
-    discretionary, ni_slots = _remaining_slots(state.now, params, ni_applies)
-    dli_per_hour = lamp.dli_per_hour()
-    planned_ni_dli = len(ni_slots) * params.interval_hours * dli_per_hour
-
-    projected = state.dli_today + state.forecast_remaining + planned_ni_dli
-    deficit = max(0.0, d.target_dli - projected)
-    hours_needed = deficit / dli_per_hour if dli_per_hour > 0 else float("inf")
-    hours_available = len(discretionary) * params.interval_hours
-    slack = hours_available - hours_needed
+            bypass_hold=True,
+            evidence={"allowed_windows": windows, "target_dli": d.target_dli}, **common)
 
     natural = estimate_natural_ppfd(state, params)
-    common = dict(deficit_dli=deficit, hours_needed=hours_needed,
-                  hours_available=hours_available, slack_hours=slack,
-                  planned_ni_dli=planned_ni_dli, projected_dli=projected)
     evidence = {
         "dli_today": state.dli_today,
         "forecast_remaining": state.forecast_remaining,

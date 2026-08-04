@@ -28,6 +28,7 @@ class Reading:
     ppfd: float | None
     source: str                 # measured / estimated_* / missing
     external_ppfd: float | None = None
+    air_temperature: float | None = None
 
     @property
     def is_measured(self) -> bool:
@@ -69,6 +70,19 @@ class DataSource(ABC):
     def external_history(self, start: datetime | None = None,
                          end: datetime | None = None) -> pd.Series:
         """외부 PPFD 시계열. 동일하게 now() 를 넘지 못한다."""
+
+    def temperature_history(self, zone_id: str, start: datetime | None = None,
+                            end: datetime | None = None) -> pd.Series:
+        """기온 시계열. 온도 데이터가 없는 구현은 빈 Series 를 돌려준다."""
+        return pd.Series(dtype=float)
+
+    def sensor_age_minutes(self, zone_id: str) -> float | None:
+        """마지막 '실측' 이후 경과 분. 센서·통신 이상 감지에 쓴다.
+
+        추정으로 채워진 값은 실측이 아니므로 age 를 리셋하지 않는다 —
+        결측을 보정해 놓고 센서가 살아 있다고 착각하면 안 된다.
+        """
+        return None
 
     def today(self, zone_id: str) -> pd.Series:
         """당일 00:00 부터 now() 까지."""

@@ -94,6 +94,28 @@ class DecisionConfig:
 
 
 @dataclass(frozen=True)
+class SafetyConfig:
+    """안전 조건. 광량 판단보다 우선한다."""
+
+    max_air_temperature: float
+    resume_air_temperature: float
+    override_ni_on_high_temp: bool
+    max_sensor_age_minutes: float
+
+    def is_too_hot(self, temperature: float | None, currently_on: bool) -> bool:
+        """고온으로 점등을 막아야 하는가. 온도에도 히스테리시스를 둔다.
+
+        - 켜져 있을 때: max 이상이면 중단
+        - 꺼져 있을 때: resume 이하로 내려와야 재개 (max 근처에서 점·소등이 반복되지 않도록)
+        """
+        if temperature is None:
+            return False
+        if currently_on:
+            return temperature >= self.max_air_temperature
+        return temperature > self.resume_air_temperature
+
+
+@dataclass(frozen=True)
 class ForecastConfig:
     mode: str
     mode_factors: dict[str, float]
@@ -150,6 +172,7 @@ class SiteConfig:
     lamp: LampConfig
     ni: NIConfig
     decision: DecisionConfig
+    safety: SafetyConfig
     forecast: ForecastConfig
     tariff: TariffConfig
     logger_dir: Path
@@ -185,6 +208,23 @@ class SiteConfig:
     @property
     def is_fully_verified(self) -> bool:
         return not self.unverified_groups
+
+    def with_zones(self, specs: list[tuple[str, str, str]],
+                   greenhouse_name: str = "업로드 데이터") -> "SiteConfig":
+        """구역 구성을 바꾼 사본. (zone_id, 표시명, 처리) 목록을 받는다.
+
+        업로드된 파일의 컬럼(B5_5_PPFD 등)을 구역으로 쓰기 위한 것.
+        판단 파라미터·안전조건·요금은 그대로 유지된다.
+        """
+        from dataclasses import replace as _replace
+        zones = [ZoneConfig(id=zid, name=name, treatment=treatment,
+                            greenhouse_id="uploaded", greenhouse_name=greenhouse_name,
+                            reference=(i == 0), logger_id="", ppfd_column=zid)
+                 for i, (zid, name, treatment) in enumerate(specs)]
+        if not zones:
+            raise ValueError("구역이 하나도 지정되지 않았습니다.")
+        gh = GreenhouseConfig(id="uploaded", name=greenhouse_name, zones=zones)
+        return _replace(self, greenhouses=[gh])
 
     def unverified_message(self) -> str:
         if self.is_fully_verified:
@@ -285,6 +325,19 @@ def _validate(cfg: SiteConfig) -> None:
                 f"{(cap_minutes - ni_minutes) / 60:.1f}시간뿐입니다.")
 
 
+def _validate_safety(cfg: SiteConfig) -> None:
+    s = cfg.safety
+    if s.resume_air_temperature > s.max_air_temperature:
+        raise ValueError(
+            f"safety.resume_air_temperature({s.resume_air_temperature}) 는 "
+            f"max_air_temperature({s.max_air_temperature}) 이하여야 합니다. "
+            "뒤집히면 고온 구간에서 점·소등이 반복됩니다.")
+    if s.max_sensor_age_minutes < cfg.interval_minutes:
+        cfg.warnings.append(
+            f"safety.max_sensor_age_minutes({s.max_sensor_age_minutes})가 측정 간격"
+            f"({cfg.interval_minutes}분)보다 짧습니다. 정상 상태에서도 센서 이상으로 잡힙니다.")
+
+
 def _minutes_in_day(window: TimeWindow, interval_minutes: int) -> float:
     """달력일 하루 안에서 시간창이 차지하는 분. 자정을 넘는 창도 하루분만 센다."""
     from datetime import datetime, timedelta
@@ -320,6 +373,7 @@ def load_config(path: str | Path | None = None) -> SiteConfig:
     ni_block = check_verified(raw.get("ni", {}), "NI 스케줄")
     dec_block = check_verified(raw.get("decision", {}), "판단 기준(목표 DLI·임계값)")
     tariff_block = check_verified(raw.get("tariff", {}), "전기요금 단가")
+    safety_block = check_verified(raw.get("safety", {}), "안전 조건(고온 한계)")
     ext_block = raw.get("external", {}) or {}
     fc_block = raw.get("forecast", {}) or {}
     data_block = raw.get("data", {}) or {}
@@ -365,6 +419,12 @@ def load_config(path: str | Path | None = None) -> SiteConfig:
             allowed_windows=_parse_windows(dec_block.get("allowed_windows", [])),
             urgency_margin_hours=float(dec_block.get("urgency_margin_hours", 0.5)),
         ),
+        safety=SafetyConfig(
+            max_air_temperature=float(safety_block.get("max_air_temperature", 32.0)),
+            resume_air_temperature=float(safety_block.get("resume_air_temperature", 30.0)),
+            override_ni_on_high_temp=bool(safety_block.get("override_ni_on_high_temp", False)),
+            max_sensor_age_minutes=float(safety_block.get("max_sensor_age_minutes", 30)),
+        ),
         forecast=ForecastConfig(
             mode=fc_block.get("mode", "standard"),
             mode_factors={k: float(v) for k, v in
@@ -382,4 +442,5 @@ def load_config(path: str | Path | None = None) -> SiteConfig:
         warnings=warnings,
     )
     _validate(cfg)
+    _validate_safety(cfg)
     return cfg

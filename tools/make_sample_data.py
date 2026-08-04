@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import argparse
 import math
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from pathlib import Path
 
 import numpy as np

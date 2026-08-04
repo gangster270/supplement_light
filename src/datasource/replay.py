@@ -137,16 +137,36 @@ class ReplayDataSource(DataSource):
         """각 값의 출처 플래그 시계열 (추정값 기반 판단인지 UI에 표시하기 위함)."""
         return self._frame.source.loc[self._window_mask(start, end), zone_id]
 
+    def temperature_history(self, zone_id: str, start: datetime | None = None,
+                            end: datetime | None = None) -> pd.Series:
+        if not self._frame.has_temperature or zone_id not in self._frame.temperature.columns:
+            return pd.Series(dtype=float)
+        return self._frame.temperature.loc[self._window_mask(start, end), zone_id]
+
+    def sensor_age_minutes(self, zone_id: str) -> float | None:
+        """마지막 실측(measured) 이후 경과 분. 실측이 하나도 없으면 None."""
+        src = self.source_history(zone_id)
+        measured = src[src == "measured"]
+        if measured.empty:
+            return None
+        delta = pd.Timestamp(self.now()) - measured.index[-1]
+        return float(delta.total_seconds() / 60.0)
+
     def latest(self, zone_id: str) -> Reading | None:
         ts = self._index[self._cursor]
         value = self._frame.ppfd.at[ts, zone_id]
         ext = self._frame.external.at[ts] if ts in self._frame.external.index else None
+        temp = None
+        if self._frame.has_temperature and zone_id in self._frame.temperature.columns:
+            raw = self._frame.temperature.at[ts, zone_id]
+            temp = None if pd.isna(raw) else float(raw)
         return Reading(
             timestamp=ts.to_pydatetime(),
             zone_id=zone_id,
             ppfd=None if pd.isna(value) else float(value),
             source=str(self._frame.source.at[ts, zone_id]),
             external_ppfd=None if ext is None or pd.isna(ext) else float(ext),
+            air_temperature=temp,
         )
 
     # --- 백테스트용 ----------------------------------------------------

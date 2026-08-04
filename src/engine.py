@@ -34,7 +34,7 @@ from .forecast import Forecaster
 from .metrics import ClearSkyProfile, dli_from_ppfd, latest_moving_average
 from .metrics import historical_lighting_windows as historical_lighting_windows_default
 from .metrics import natural_light_frame, remove_lamp_contribution
-from .timeutil import TimeWindow, day_bounds, minute_of_day
+from .timeutil import TimeWindow, minute_of_day
 
 
 @dataclass
@@ -95,6 +95,9 @@ class DecisionEngine:
         self.forecasters = forecasters
         self.runtime: dict[str, ZoneRuntime] = {z.id: ZoneRuntime() for z in cfg.zones}
         self.photoperiod_threshold = photoperiod_threshold
+        # 예측 모드는 호출 시점에 넘긴다. 예측기를 다시 만들지 않고 모드만 바꿀 수 있어야
+        # UI 슬라이더를 움직일 때마다 수 초씩 재학습하지 않는다.
+        self.forecast_mode = cfg.forecast.mode
         # 과거 실제 점등 시간대. 기본은 NI 스케줄(해당 처리구에 한해).
         self.historical_lighting_windows = (historical_lighting_windows
                                             or historical_lighting_windows_default(cfg))
@@ -112,6 +115,19 @@ class DecisionEngine:
         """우리 판단으로 오늘 켠 시간의 DLI 기여분."""
         lighting, _ = self.runtime[zone_id].daily_counters(now.date())
         return (lighting / 60.0) * self.cfg.lamp.dli_per_hour()
+
+    def lamp_dli_series(self, zone_id: str, index: pd.DatetimeIndex) -> pd.Series:
+        """우리 판단으로 켠 시간의 **누적** DLI 시계열.
+
+        화면에서 '자연광 DLI'와 'LED 기여 DLI'를 분리해 보여주기 위한 것.
+        단순히 오늘 총 기여분을 상수로 더하면 그래프가 실제 누적 곡선과 달라진다.
+        """
+        if len(index) == 0:
+            return pd.Series(dtype=float)
+        on_at = {ts: on for ts, on in self.runtime[zone_id].history}
+        per_step = self.cfg.lamp.dli_per_hour() * (self.cfg.interval_minutes / 60.0)
+        values = [per_step if on_at.get(ts.to_pydatetime(), False) else 0.0 for ts in index]
+        return pd.Series(values, index=index).cumsum()
 
     def clear_sky_now(self, zone_id: str, now: datetime) -> float:
         profile = self.profiles.get(zone_id)
@@ -149,7 +165,7 @@ class DecisionEngine:
 
         forecaster = self.forecasters.get(zone_id)
         if forecaster is not None:
-            fc = forecaster.predict(natural_today, now)
+            fc = forecaster.predict(natural_today, now, mode=self.forecast_mode)
             remaining, low, high = fc.expected, fc.low, fc.high
             note, confidence = fc.note, fc.confidence
         else:
@@ -158,6 +174,8 @@ class DecisionEngine:
 
         latest = source.latest(zone_id)
         return DecisionState(
+            air_temperature=latest.air_temperature if latest else None,
+            sensor_age_minutes=source.sensor_age_minutes(zone_id),
             now=now,
             zone_id=zone_id,
             treatment=zone.treatment,

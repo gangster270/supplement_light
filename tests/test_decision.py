@@ -325,6 +325,22 @@ class TestEvidence:
                     assert d.action in (Action.TURN_OFF, Action.KEEP_OFF)
                     assert (d.action is Action.KEEP_OFF) == (not lamp_on)
 
+    def test_조기반환에도_DLI_수지가_채워진다(self, params):
+        """L0/S0 에서 반환되어도 예상 최종 DLI 가 0 으로 남으면 화면에서 '충족'처럼 읽힌다."""
+        cases = [
+            make_state(now=datetime(2026, 5, 15, 12, 0)),                       # 시간대 밖
+            make_state(now=datetime(2026, 5, 15, 20, 0)),                       # NI
+            make_state(treatment="무처리", air_temperature=40.0),                # 고온
+            make_state(treatment="무처리", sensor_age_minutes=120),              # 센서 이상
+            make_state(lighting_minutes_today=8 * 60),                          # 상한
+        ]
+        for state in cases:
+            d = decide(state, params)
+            expected = state.dli_today + state.forecast_remaining + d.planned_ni_dli
+            assert d.projected_dli == pytest.approx(expected), d.layer
+            assert d.projected_dli > 0
+            assert d.evidence.get("target_dli") == params.decision.target_dli
+
     def test_ppfd_결측이어도_판단이_나온다(self, params):
         """센서가 죽어도 서비스가 멈추면 안 된다 (DLI 기준으로는 판단 가능)."""
         state = make_state(ppfd_ma=None, ppfd_source="missing")

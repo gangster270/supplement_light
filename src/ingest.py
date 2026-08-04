@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import io
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,15 +60,18 @@ def _unique_columns(cells: list) -> list[str]:
     return cols
 
 
-def read_logger_file(path: str | Path) -> pd.DataFrame:
-    """단일 로거 파일(.xlsx/.csv)을 DataFrame 으로. dtype=object 로 읽어 오류문자열을 보존한다."""
-    path = Path(path)
-    ext = path.suffix.lower()
+def read_table(buffer, filename: str) -> pd.DataFrame:
+    """파일 경로 또는 업로드된 file-like 객체를 DataFrame 으로 읽는다.
+
+    Streamlit 업로드와 로컬 경로가 같은 경로를 타도록 buffer 를 받는다.
+    dtype=object 로 읽어 '#VALUE!' 같은 오류 문자열을 보존한다.
+    """
+    ext = os.path.splitext(filename)[1].lower()
     if ext in (".xlsx", ".xls"):
-        xl = pd.ExcelFile(path, engine="openpyxl" if ext == ".xlsx" else None)
+        xl = pd.ExcelFile(buffer, engine="openpyxl" if ext == ".xlsx" else None)
         raw = xl.parse(sheet_name=_pick_sheet(xl.sheet_names), header=None, dtype=object)
     elif ext == ".csv":
-        data = path.read_bytes()
+        data = buffer.read() if hasattr(buffer, "read") else Path(buffer).read_bytes()
         raw = None
         for enc in ("utf-8-sig", "cp949", "euc-kr", "latin1"):
             try:
@@ -78,17 +80,23 @@ def read_logger_file(path: str | Path) -> pd.DataFrame:
             except Exception:
                 continue
         if raw is None:
-            raise ValueError(f"CSV 인코딩을 인식할 수 없습니다: {path.name}")
+            raise ValueError(f"CSV 인코딩을 인식할 수 없습니다: {filename}")
     else:
-        raise ValueError(f"지원하지 않는 형식입니다: {path.name}")
+        raise ValueError(f"지원하지 않는 형식입니다: {filename} (csv/xlsx 만 지원)")
 
     if raw is None or raw.dropna(how="all").empty:
-        raise ValueError(f"'{path.name}' 에서 읽을 수 있는 데이터가 없습니다.")
+        raise ValueError(f"'{filename}' 에서 읽을 수 있는 데이터가 없습니다.")
 
     hdr = _detect_header_row(raw)
     df = raw.iloc[hdr + 1:].copy()
     df.columns = _unique_columns(raw.iloc[hdr].tolist())
     return df.dropna(how="all").reset_index(drop=True)
+
+
+def read_logger_file(path: str | Path) -> pd.DataFrame:
+    """단일 로거 파일(.xlsx/.csv)을 DataFrame 으로."""
+    path = Path(path)
+    return read_table(path, path.name)
 
 
 def find_column(df: pd.DataFrame, keyword: str, exclude: tuple[str, ...] = ()) -> str | None:
@@ -215,6 +223,7 @@ class SiteFrame:
     source: pd.DataFrame
     interval_minutes: int
     report: dict
+    temperature: pd.DataFrame | None = None   # 안전 조건(고온 차단)용. 없으면 None.
 
     @property
     def index(self) -> pd.DatetimeIndex:
@@ -234,6 +243,10 @@ class SiteFrame:
     def measured_ratio(self) -> pd.Series:
         return (self.source == "measured").mean()
 
+    @property
+    def has_temperature(self) -> bool:
+        return self.temperature is not None and not self.temperature.empty
+
     def slice(self, start=None, end=None) -> "SiteFrame":
         """[start, end) 구간을 잘라낸 새 SiteFrame."""
         idx = self.ppfd.index
@@ -242,19 +255,23 @@ class SiteFrame:
             mask &= idx >= pd.Timestamp(start)
         if end is not None:
             mask &= idx < pd.Timestamp(end)
+        temp = self.temperature.loc[mask] if self.has_temperature else None
         return SiteFrame(self.ppfd.loc[mask], self.external.loc[mask], self.source.loc[mask],
-                         self.interval_minutes, self.report)
+                         self.interval_minutes, self.report, temp)
 
     @classmethod
     def from_wide(cls, ppfd: pd.DataFrame, external: pd.Series, interval_minutes: int,
-                  report: dict | None = None) -> "SiteFrame":
+                  report: dict | None = None,
+                  temperature: pd.DataFrame | None = None) -> "SiteFrame":
         """이미 정리된 wide 프레임으로 SiteFrame 을 만든다 (테스트·합성데이터용)."""
         ppfd = ppfd.sort_index()
         external = external.reindex(ppfd.index)
         source = pd.DataFrame(
             np.where(ppfd.notna(), "measured", "missing"),
             index=ppfd.index, columns=ppfd.columns)
-        return cls(ppfd, external, source, interval_minutes, report or {})
+        if temperature is not None:
+            temperature = temperature.reindex(ppfd.index)
+        return cls(ppfd, external, source, interval_minutes, report or {}, temperature)
 
 
 def discover_logger_files(logger_dir: Path, logger_id: str) -> list[Path]:
@@ -326,3 +343,90 @@ def load_site_frame(cfg: SiteConfig, logger_dir: Path | None = None,
 
     return SiteFrame.from_wide(grid[[z.id for z in cfg.zones]], ext_series,
                                cfg.interval_minutes, report)
+
+
+# =====================================================================
+# 업로드 파일 처리 (Streamlit 등)
+# =====================================================================
+
+def numeric_columns(df: pd.DataFrame, ts_col: str | None = None) -> list[str]:
+    """숫자로 해석 가능한 컬럼만 (측정값 후보)."""
+    out = []
+    for c in df.columns:
+        if ts_col is not None and c == ts_col:
+            continue
+        vals = to_numeric(df[c])
+        if vals.notna().mean() > 0.5:
+            out.append(c)
+    return out
+
+
+def guess_ppfd_columns(columns: list[str]) -> list[str]:
+    """'B5_5_PPFD', ' µmol·m⁻²·s⁻¹ PPFD' 처럼 온실 **내부** PPFD 로 보이는 컬럼을 추린다.
+
+    외부(온실 밖) PPFD 는 구역이 아니라 기준값이므로 제외한다 — 구역으로 잡히면
+    투과율 100% 인 가짜 구역이 하나 생긴다.
+    """
+    keys = ("ppfd", "µmol", "umol", "광량", "quantum", "par")
+    outside = ("외부", "external", "outdoor", "옥외", "노지", "기상", "퀀텀센터")
+    hits = [c for c in columns
+            if any(k in str(c).lower() for k in keys)
+            and not any(x in str(c).lower() for x in outside)]
+    return hits or list(columns)
+
+
+def guess_external_column(columns: list[str]) -> str | None:
+    """외부(온실 밖) PPFD 컬럼 추정."""
+    outside = ("외부", "external", "outdoor", "옥외", "노지", "퀀텀센터")
+    for c in columns:
+        low = str(c).lower()
+        if any(x in low for x in outside):
+            return c
+    return None
+
+
+def guess_temperature_column(columns: list[str]) -> str | None:
+    """기온 컬럼 추정. 지온·배지온도는 제외해야 한다 (둘 다 'temperature' 를 포함)."""
+    exclude = ("soil", "substrate", "배지", "근권", "water", "logger", "device")
+    for c in columns:
+        low = str(c).lower()
+        if any(k in low for k in ("air temperature", "기온", "대기온도")):
+            return c
+    for c in columns:
+        low = str(c).lower()
+        if ("temp" in low or "온도" in low) and not any(x in low for x in exclude):
+            return c
+    return None
+
+
+def build_frame_from_columns(df: pd.DataFrame, ts_col: str, zone_columns: dict[str, str],
+                             interval_minutes: int, external_column: str | None = None,
+                             temperature_column: str | None = None) -> SiteFrame:
+    """사용자가 고른 컬럼 매핑으로 SiteFrame 을 만든다.
+
+    zone_columns: {zone_id: 원본 컬럼명}
+    """
+    ts = pd.to_datetime(df[ts_col], errors="coerce")
+    valid = ts.notna()
+    if valid.sum() == 0:
+        raise ValueError(f"'{ts_col}' 컬럼을 시각으로 해석하지 못했습니다.")
+    index = pd.DatetimeIndex(ts[valid])
+
+    series_map = {zid: pd.Series(to_numeric(df.loc[valid, col]).to_numpy(), index=index)
+                  for zid, col in zone_columns.items()}
+    if external_column:
+        series_map["__external__"] = pd.Series(
+            to_numeric(df.loc[valid, external_column]).to_numpy(), index=index)
+    if temperature_column:
+        series_map["__temperature__"] = pd.Series(
+            to_numeric(df.loc[valid, temperature_column]).to_numpy(), index=index)
+
+    grid, report = build_grid(series_map, interval_minutes)
+    ext = (grid.pop("__external__") if "__external__" in grid.columns
+           else pd.Series(np.nan, index=grid.index))
+    temp = grid.pop("__temperature__") if "__temperature__" in grid.columns else None
+    zone_ids = list(zone_columns)
+    temp_df = (pd.DataFrame({z: temp for z in zone_ids}, index=grid.index)
+               if temp is not None else None)
+    report["columns"] = dict(zone_columns)
+    return SiteFrame.from_wide(grid[zone_ids], ext, interval_minutes, report, temp_df)

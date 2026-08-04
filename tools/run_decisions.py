@@ -103,7 +103,7 @@ def main() -> None:
     print(df["레이어"].value_counts().to_string())
 
     per_day = df[df["신호"] == "ON"].groupby(df["시각"].dt.date).size() * cfg.interval_minutes / 60
-    print(f"\n일별 점등시간 (시간)")
+    print("\n일별 점등시간 (시간)")
     print(per_day.to_string() if len(per_day) else "  (점등 없음)")
     kw = cfg.lamp.power_kw_per_zone
     print(f"\n총 점등 {per_day.sum():.1f}시간 × {kw:.1f}kW = {per_day.sum() * kw:.1f} kWh "

@@ -11,7 +11,7 @@ UI는 이 밴드를 반드시 표시해야 한다 — 예측을 확정값처럼 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
@@ -19,7 +19,7 @@ import pandas as pd
 from .config import SiteConfig
 from .ingest import SiteFrame
 from .metrics import ClearSkyProfile, clearness_index, dli_from_ppfd
-from .timeutil import day_bounds, minute_of_day
+from .timeutil import minute_of_day
 
 CONFIDENCE_HIGH = "high"
 CONFIDENCE_LOW = "low"

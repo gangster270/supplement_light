@@ -166,8 +166,10 @@ supplement_light/
 | **P3** | 잔여 자연광 예측 | `forecast.py` | 과거 데이터로 예측 오차(MAE) 측정 |
 | **P4** | 판단 엔진 + 단위 테스트 | `decision.py`, `tests/` | 경계 조건 테스트 (임계 근처, NI 경계, 채터링) |
 | **P5** | 백테스트 | `backtest.py` | 전 기간 실행, 결과 타당성 검토 |
-| **P6** | Streamlit UI | `app.py` | 실제 조작 |
-| **P7** | 경제성 + 판단 이력 | `economics.py`, `logbook.py` | 요금 수계산 대조 |
+| **P6** | Streamlit 시범 서비스 | `app.py`, `scenario.py` | 브라우저 실제 조작 |
+| **S0** | 안전 조건 (고온·센서 이상) | `decision.py` | 경계 조건 테스트 |
+| **P7** | 판단 이력 + 제어 명령 미리보기 | `logbook.py`, `control.py` | 요금 수계산 대조 |
+| — | 정밀 경제성 (기본요금·ROI) | `economics.py` | 청구서 대조 |
 | **P8** | 문서화 (사용법 / 파라미터 재산출 절차) | `README.md` | — |
 
 P4·P5를 P6보다 먼저 놓은 이유: **UI부터 만들면 판단 로직을 눈으로만 확인하게 되어 파라미터를 근거 없이 고르게 된다.** 백테스트로 숫자를 먼저 확보한 뒤 UI를 씌운다.

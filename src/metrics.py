@@ -18,7 +18,7 @@ import pandas as pd
 
 from .config import SiteConfig
 from .ingest import SiteFrame
-from .timeutil import TimeWindow, circular_doy_distance, day_of_year, minute_of_day
+from .timeutil import TimeWindow, day_of_year, minute_of_day
 
 # 출처 플래그
 SRC_MEASURED = "measured"
@@ -160,7 +160,8 @@ def natural_light_frame(frame: SiteFrame, cfg: SiteConfig,
     for zone_id in ppfd.columns:
         ppfd[zone_id] = remove_lamp_contribution(
             ppfd[zone_id], windows.get(zone_id, []), cfg.lamp.ppfd_contribution)
-    return SiteFrame(ppfd, frame.external, frame.source, frame.interval_minutes, frame.report)
+    return SiteFrame(ppfd, frame.external, frame.source, frame.interval_minutes,
+                     frame.report, frame.temperature)
 
 
 def estimate_lamp_contribution(frame: SiteFrame, cfg: SiteConfig) -> dict[str, float]:
@@ -246,7 +247,7 @@ def fill_missing(frame: SiteFrame, cfg: SiteConfig,
 
     report = dict(frame.report)
     report["fill"] = diagnostics
-    return SiteFrame(ppfd, external, source, frame.interval_minutes, report)
+    return SiteFrame(ppfd, external, source, frame.interval_minutes, report, frame.temperature)
 
 
 # =====================================================================

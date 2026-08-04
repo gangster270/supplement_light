@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.config import (DecisionConfig, ExternalConfig, ForecastConfig, GreenhouseConfig,
-                        LampConfig, NIConfig, SiteConfig, TariffConfig, TariffSeason,
-                        TariffSlot, ZoneConfig)
+                        LampConfig, NIConfig, SafetyConfig, SiteConfig, TariffConfig,
+                        TariffSeason, TariffSlot, ZoneConfig)
 from src.decision import DecisionParams, DecisionState
 from src.ingest import SiteFrame
 from src.tariff import TariffLookup
@@ -50,6 +50,8 @@ def cfg() -> SiteConfig:
             allowed_windows=[TimeWindow.parse("04:00-08:00"),
                              TimeWindow.parse("15:00-22:00")],
             urgency_margin_hours=0.5),
+        safety=SafetyConfig(max_air_temperature=32.0, resume_air_temperature=30.0,
+                            override_ni_on_high_temp=False, max_sensor_age_minutes=30.0),
         forecast=ForecastConfig(mode="standard",
                                 mode_factors={"conservative": 0.75, "standard": 1.0,
                                               "aggressive": 1.25},
@@ -67,7 +69,7 @@ def cfg() -> SiteConfig:
 @pytest.fixture
 def params(cfg) -> DecisionParams:
     return DecisionParams(decision=cfg.decision, lamp=cfg.lamp, ni=cfg.ni,
-                          interval_minutes=cfg.interval_minutes,
+                          interval_minutes=cfg.interval_minutes, safety=cfg.safety,
                           tariff=TariffLookup(cfg.tariff))
 
 
